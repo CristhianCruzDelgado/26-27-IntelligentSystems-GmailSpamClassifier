@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Preprocesado Enron-Spam -> dataset multiclase en español.
+Preprocesado Enron-Spam -> dataset multiclase.
 
 Fases:
-1. Carga (por chunks) y filtrado de columnas (message, spam/ham), sin nulos ni duplicados.
+1. Carga (por chunks), filtrado de columnas (message, spam/ham), limpieza estructural, sin nulos ni duplicados.
 2. Reetiquetado multiclase de 'ham' mediante regex compiladas.
 3. Balanceo estratificado (N registros por clase).
-4. Traducción EN -> ES (Helsinki-NLP/opus-mt-en-es) solo sobre el subconjunto balanceado.
-5. Exportación a ./dataset/enron_multiclase_es.csv (text, label).
+4. Exportación a dataset/enron_multiclass.csv (text, label).
 
 Uso:
     python preprocess_enron.py
-    python preprocess_enron.py --n-per-class 200 --batch-size 16 --max-chars 1000 --min-matches 3
+    python preprocess_enron.py --n-per-class 250 --min-matches 3
 """
 from __future__ import annotations
 
@@ -27,21 +26,14 @@ import pandas as pd
 # --------------------------------------------------------------------------- #
 # CONFIGURACIÓN
 # --------------------------------------------------------------------------- #
-DATA_DIR = Path("./dataset")
-OUTPUT_PATH = DATA_DIR / "enron_multiclase_es.csv"
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "dataset"
+OUTPUT_PATH = DATA_DIR / "enron_multiclass_balanced.csv"
 
-N_PER_CLASS = 500          # registros por clase (configurable)
-MIN_MATCHES = 2            # coincidencias mínimas de regex para asignar categoría
+N_PER_CLASS = 250          # registros por clase (configurable)
+MIN_MATCHES = 3            # coincidencias mínimas de regex para asignar categoría
 SEED = 42
 CSV_CHUNKSIZE = 10_000     # filas por chunk al leer el CSV
-
-MODEL_NAME = "Helsinki-NLP/opus-mt-en-es"
-BATCH_SIZE = 16            # segmentos por lote en CPU
-MAX_CHARS = 1_000          # truncado del mensaje original antes de traducir
-SEGMENT_CHARS = 400        # tamaño máximo de cada segmento enviado al modelo
-MAX_TOKENS = 256           # truncado duro de tokens por segmento (seguridad)
-NUM_BEAMS = 2              # 1 = más rápido (greedy), 2-4 = mejor calidad
-NUM_THREADS = 4            # núcleos de CPU
 
 CLASSES = ["Finanzas", "Trabajo", "Soporte", "Personal", "Otros", "Spam"]
 
@@ -50,10 +42,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 log = logging.getLogger("enron")
 
 # --------------------------------------------------------------------------- #
-# FASE 2: REGEX COMPILADAS (insensibles a mayúsculas)
-# El orden del diccionario define la prioridad en caso de empate.
+# REGEX COMPILADAS DE LIMPIEZA Y CLASIFICACIÓN
 # --------------------------------------------------------------------------- #
 _FLAGS = re.IGNORECASE
+
+# Patrones para eliminar ruido estructural de correos (cabeceras, reenvíos, números, símbolos)
+_RE_FWD_BLOCK = re.compile(r"[-_\s]{3,}(?:original message|forwarded by)[-_\s]{3,}", _FLAGS)
+_RE_HEADERS = re.compile(r"\b(?:subject|from|to|sent|cc|bcc)\s*:\s*[^.!\n]{0,80}", _FLAGS)
+_RE_NUMBERS = re.compile(r"\b\d+(?:\s*[:/.-]\s*\d+)*\b")
+_RE_NON_ALPHA = re.compile(r"[^a-záéíóúüñA-ZÁÉÍÓÚÜÑ\s]")
+_RE_SPACES = re.compile(r"\s+")
+
 CATEGORY_PATTERNS: dict[str, re.Pattern] = {
     "Finanzas": re.compile(
         r"\b(?:invoic\w*|payment\w*|billing|bill|budget\w*|revenue\w*|bank\w*|loan\w*|"
@@ -82,14 +81,23 @@ CATEGORY_PATTERNS: dict[str, re.Pattern] = {
 
 
 # --------------------------------------------------------------------------- #
-# FASE 1: CARGA Y FILTRADO
+# FASE 1: CARGA, SANITIZACIÓN Y FILTRADO
 # --------------------------------------------------------------------------- #
 def _wanted_column(col: str) -> bool:
     return col.strip().lower() in {"message", "spam/ham"}
 
 
+def _clean_text(text: str) -> str:
+    """Elimina cabeceras de reenvío, fechas, números aislados y caracteres no alfabéticos."""
+    text = _RE_FWD_BLOCK.sub(" ", text)
+    text = _RE_HEADERS.sub(" ", text)
+    text = _RE_NUMBERS.sub(" ", text)
+    text = _RE_NON_ALPHA.sub(" ", text)
+    return _RE_SPACES.sub(" ", text).strip().lower()
+
+
 def _clean_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
-    """Normaliza columnas, elimina nulos y filtra etiquetas válidas."""
+    """Normaliza columnas, elimina nulos, sanitiza el texto y filtra etiquetas válidas."""
     chunk = chunk.rename(columns=lambda c: c.strip().lower())
     missing = {"message", "spam/ham"} - set(chunk.columns)
     if missing:
@@ -97,14 +105,14 @@ def _clean_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
 
     chunk = chunk[["message", "spam/ham"]].rename(columns={"message": "text", "spam/ham": "label"})
     chunk = chunk.dropna()
-    chunk["text"] = chunk["text"].astype(str).str.strip()
+    chunk["text"] = chunk["text"].astype(str).map(_clean_text)
     chunk["label"] = chunk["label"].astype(str).str.strip().str.lower()
-    chunk = chunk[(chunk["text"] != "") & chunk["label"].isin(["ham", "spam"])]
+    chunk = chunk[(chunk["text"].str.len() > 15) & chunk["label"].isin(["ham", "spam"])]
     return chunk.drop_duplicates(subset="text")
 
 
 def load_and_filter(data_dir: Path, chunksize: int = CSV_CHUNKSIZE) -> pd.DataFrame:
-    log.info("FASE 1 | Cargando datos CSV desde %s", data_dir)
+    log.info("FASE 1 | Cargando y limpiando datos CSV desde %s", data_dir)
     out_resolved = OUTPUT_PATH.resolve()
     files = sorted(
         p for p in data_dir.glob("*.csv")
@@ -176,95 +184,12 @@ def balance(df: pd.DataFrame, n_per_class: int = N_PER_CLASS, seed: int = SEED) 
 
 
 # --------------------------------------------------------------------------- #
-# FASE 4: TRADUCCIÓN EN -> ES
-# --------------------------------------------------------------------------- #
-_WS = re.compile(r"\s+")
-_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
-
-
-def split_segments(text: str, max_chars: int = MAX_CHARS, seg_chars: int = SEGMENT_CHARS) -> list[str]:
-    """Normaliza, trunca de forma segura (en límite de palabra) y trocea en segmentos."""
-    text = _WS.sub(" ", text).strip()
-    if len(text) > max_chars:
-        text = text[:max_chars].rsplit(" ", 1)[0]
-
-    pieces: list[str] = []
-    for sent in _SENT_SPLIT.split(text):
-        if len(sent) <= seg_chars:
-            pieces.append(sent)
-        else:  # frase demasiado larga: corte duro
-            pieces.extend(sent[i:i + seg_chars] for i in range(0, len(sent), seg_chars))
-
-    segments, current = [], ""
-    for piece in pieces:
-        if current and len(current) + 1 + len(piece) > seg_chars:
-            segments.append(current)
-            current = piece
-        else:
-            current = f"{current} {piece}".strip()
-    if current:
-        segments.append(current)
-    return segments or [text]
-
-
-def translate_texts(texts: list[str], batch_size: int = BATCH_SIZE, max_chars: int = MAX_CHARS) -> list[str]:
-    import torch
-    from tqdm import tqdm
-    from transformers import MarianMTModel, MarianTokenizer
-
-    torch.set_num_threads(NUM_THREADS)
-    log.info("FASE 4 | Cargando modelo %s (CPU, %d hilos)", MODEL_NAME, NUM_THREADS)
-    tokenizer = MarianTokenizer.from_pretrained(MODEL_NAME)
-    model = MarianMTModel.from_pretrained(MODEL_NAME).eval()
-
-    def run(batch: list[str]) -> list[str]:
-        inputs = tokenizer(batch, return_tensors="pt", padding=True,
-                           truncation=True, max_length=MAX_TOKENS)
-        with torch.inference_mode():
-            out = model.generate(**inputs, num_beams=NUM_BEAMS, max_new_tokens=MAX_TOKENS)
-        return tokenizer.batch_decode(out, skip_special_tokens=True)
-
-    # Aplanar: (índice_doc, orden_segmento, texto_segmento)
-    flat = [(d, s, seg) for d, t in enumerate(texts)
-            for s, seg in enumerate(split_segments(t, max_chars))]
-    flat.sort(key=lambda x: len(x[2]))  # lotes homogéneos -> menos padding -> más rápido
-    log.info("  %d mensajes -> %d segmentos a traducir", len(texts), len(flat))
-
-    translated: dict[tuple[int, int], str] = {}
-    failures = 0
-    for i in tqdm(range(0, len(flat), batch_size), desc="Traduciendo", unit="lote"):
-        batch = flat[i:i + batch_size]
-        try:
-            results = run([b[2] for b in batch])
-        except Exception as exc:  # noqa: BLE001
-            log.warning("  Lote %d falló (%s). Reintentando segmento a segmento.", i // batch_size, exc)
-            results = []
-            for _, _, seg in batch:
-                try:
-                    results.append(run([seg])[0])
-                except Exception:  # noqa: BLE001
-                    results.append(seg)  # último recurso: conservar el original
-                    failures += 1
-        for (d, s, seg), res in zip(batch, results):
-            translated[(d, s)] = res.strip() or seg
-
-    if failures:
-        log.warning("  %d segmentos no pudieron traducirse (se conservó el texto original).", failures)
-
-    # Reensamblar documentos
-    docs: dict[int, list[tuple[int, str]]] = {}
-    for (d, s), res in translated.items():
-        docs.setdefault(d, []).append((s, res))
-    return [" ".join(r for _, r in sorted(docs.get(d, []))) or texts[d] for d in range(len(texts))]
-
-
-# --------------------------------------------------------------------------- #
-# FASE 5: EXPORTACIÓN
+# FASE 4: EXPORTACIÓN
 # --------------------------------------------------------------------------- #
 def export(df: pd.DataFrame, path: Path = OUTPUT_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df[["text", "label"]].to_csv(path, index=False, encoding="utf-8")
-    log.info("FASE 5 | Guardado en %s", path)
+    log.info("FASE 4 | Guardado en %s", path)
     print("\nConteo final por clase:")
     print(df["label"].value_counts().reindex(CLASSES).dropna().astype(int).to_string())
     print(f"Total: {len(df)}")
@@ -274,12 +199,10 @@ def export(df: pd.DataFrame, path: Path = OUTPUT_PATH) -> None:
 # MAIN
 # --------------------------------------------------------------------------- #
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Preprocesado Enron-Spam multiclase EN->ES")
+    ap = argparse.ArgumentParser(description="Preprocesado Enron-Spam multiclase")
     ap.add_argument("--data-dir", type=Path, default=DATA_DIR)
     ap.add_argument("--n-per-class", type=int, default=N_PER_CLASS)
     ap.add_argument("--min-matches", type=int, default=MIN_MATCHES)
-    ap.add_argument("--batch-size", type=int, default=BATCH_SIZE)
-    ap.add_argument("--max-chars", type=int, default=MAX_CHARS)
     ap.add_argument("--seed", type=int, default=SEED)
     args = ap.parse_args()
 
@@ -287,10 +210,8 @@ def main() -> None:
     df = load_and_filter(args.data_dir)
     df = relabel(df, args.min_matches)
     df = balance(df, args.n_per_class, args.seed)
-
-    df["text"] = translate_texts(df["text"].tolist(), args.batch_size, args.max_chars)
     export(df)
-    log.info("Completado en %.1f min", (time.time() - t0) / 60)
+    log.info("Completado en %.2f s", time.time() - t0)
 
 
 if __name__ == "__main__":
