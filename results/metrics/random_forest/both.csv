@@ -1,0 +1,2 @@
+scenario,model,evaluation,params,threshold,accuracy,accuracy_std,precision,precision_std,recall,recall_std,f1,f1_std,tn,fp,fn,tp,batch_100_seconds,single_email_seconds
+both,random_forest,cv,"{""min_samples_leaf"": 2}",0.3,0.920182,0.010819,0.851345,0.070057,0.65508,0.049707,0.738352,0.037081,,,,,,

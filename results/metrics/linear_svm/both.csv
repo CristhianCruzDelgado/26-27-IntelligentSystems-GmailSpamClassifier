@@ -1,0 +1,2 @@
+scenario,model,evaluation,params,threshold,accuracy,accuracy_std,precision,precision_std,recall,recall_std,f1,f1_std,tn,fp,fn,tp,batch_100_seconds,single_email_seconds
+both,linear_svm,cv,"{""C"": 10.0, ""class_weight"": null}",,0.935359,0.013305,0.873795,0.050574,0.731858,0.064858,0.795065,0.045745,,,,,,

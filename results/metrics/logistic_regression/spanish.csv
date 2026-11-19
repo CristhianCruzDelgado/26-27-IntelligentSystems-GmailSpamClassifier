@@ -1,0 +1,3 @@
+scenario,model,evaluation,params,threshold,accuracy,accuracy_std,precision,precision_std,recall,recall_std,f1,f1_std,tn,fp,fn,tp,batch_100_seconds,single_email_seconds
+spanish,logistic_regression,cv,"{""C"": 100.0, ""class_weight"": null}",0.3,0.918776,0.019912,0.878788,0.125147,0.717778,0.144999,0.773829,0.071883,,,,,,
+spanish,logistic_regression,test,"{""C"": 100.0, ""class_weight"": null}",0.3,0.886364,,0.833333,,0.555556,,0.666667,,34,1,4,5,0.028989,0.019783
