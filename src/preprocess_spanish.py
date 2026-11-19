@@ -12,6 +12,7 @@ Uso:
     python preprocess_spanish.py
     python preprocess_spanish.py --n-per-class 100
 """
+
 from __future__ import annotations
 
 import argparse

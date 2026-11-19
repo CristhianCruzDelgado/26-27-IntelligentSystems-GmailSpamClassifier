@@ -12,6 +12,7 @@ Uso:
     python preprocess_enron.py
     python preprocess_enron.py --n-per-class 250 --min-matches 3
 """
+
 from __future__ import annotations
 
 import argparse
